@@ -1,18 +1,25 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import { streamTextToSpeech } from './services/geminiService';
-import { decode, decodeAudioData, createWavBlob } from './utils/audioUtils';
-import { chunkText } from './utils/textUtils';
-import { getFriendlyErrorMessage } from './utils/errorUtils';
+import { decode, decodeAudioData, concatenateAudioBuffers, audioBufferToWav } from './utils/audioUtils';
 import Spinner from './components/Spinner';
 import { STORY_TEXT, VOICES } from './constants';
 
-type Status = 'idle' | 'generating' | 'ready' | 'playing' | 'error';
+type Status = 'idle' | 'generating' | 'playing' | 'error';
 
-const LOCAL_STORAGE_KEY = 'storyteller-ai-story';
+type StatusIndicatorProps = {
+  status: Status;
+  error: string | null;
+  progress: { current: number; total: number } | null;
+};
 
-const StatusIndicator: React.FC<{ status: Status; error: string | null }> = ({ status, error }) => {
+const StatusIndicator: React.FC<StatusIndicatorProps> = ({ status, error, progress }) => {
   let statusText = '';
   let bgColor = 'bg-gray-600';
+  let progressText = '';
+
+  if (status === 'generating' && progress && progress.total > 0) {
+    progressText = `(${progress.current}/${progress.total} paragraphs)`;
+  }
 
   switch (status) {
     case 'idle':
@@ -22,10 +29,6 @@ const StatusIndicator: React.FC<{ status: Status; error: string | null }> = ({ s
     case 'generating':
       statusText = 'Generating Audio...';
       bgColor = 'bg-yellow-500 animate-pulse';
-      break;
-    case 'ready':
-      statusText = 'Audio Ready';
-      bgColor = 'bg-green-500';
       break;
     case 'playing':
       statusText = 'Playing...';
@@ -42,7 +45,7 @@ const StatusIndicator: React.FC<{ status: Status; error: string | null }> = ({ s
       <div className="flex items-center justify-between">
         <div className="flex items-center space-x-3">
           <span className={`px-3 py-1 text-sm font-semibold text-white rounded-full ${bgColor}`}>
-            {statusText}
+            {statusText} {progressText}
           </span>
           {status === 'generating' && <Spinner />}
         </div>
@@ -54,247 +57,172 @@ const StatusIndicator: React.FC<{ status: Status; error: string | null }> = ({ s
   );
 };
 
+const DownloadIcon: React.FC = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 inline-block" viewBox="0 0 20 20" fill="currentColor">
+      <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
+    </svg>
+);
+
 const App: React.FC = () => {
-  const [story, setStory] = useState<string>(() => {
-    try {
-      const savedStory = window.localStorage.getItem(LOCAL_STORAGE_KEY);
-      return savedStory ? savedStory : STORY_TEXT;
-    } catch (error) {
-      console.warn("Could not read story from local storage:", error);
-      return STORY_TEXT;
-    }
-  });
+  const [story, setStory] = useState<string>(STORY_TEXT);
   const [status, setStatus] = useState<Status>('idle');
   const [error, setError] = useState<string | null>(null);
   const [selectedVoice, setSelectedVoice] = useState<string>(VOICES[0]);
-  const [playbackRate, setPlaybackRate] = useState<number>(1);
+  const [pitch, setPitch] = useState<number>(0);
+  const [speed, setSpeed] = useState<number>(1);
+  const [downloadableAudio, setDownloadableAudio] = useState<Blob | null>(null);
+  const [progress, setProgress] = useState<{ current: number; total: number } | null>(null);
 
   const audioContextRef = useRef<AudioContext | null>(null);
-  const audioBufferRef = useRef<AudioBuffer | null>(null);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
-  const allAudioBytesRef = useRef<Uint8Array[]>([]);
-  const isCancelledRef = useRef<boolean>(false);
+  const generationCancelledRef = useRef(false);
 
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(LOCAL_STORAGE_KEY, story);
-    } catch (error) {
-      console.warn("Could not save story to local storage:", error);
-    }
-  }, [story]);
-
-  useEffect(() => {
+  const stopPlayback = useCallback(() => {
+    generationCancelledRef.current = true;
     if (audioSourceRef.current) {
-        audioSourceRef.current.playbackRate.value = playbackRate;
+        try {
+          audioSourceRef.current.stop();
+        } catch (e) {
+          console.warn("Could not stop audio source, it may have already finished.", e);
+        }
+        audioSourceRef.current = null;
     }
-  }, [playbackRate]);
-
-  const handleReset = useCallback(() => {
-    isCancelledRef.current = true;
-    if (audioSourceRef.current) {
-      try {
-        audioSourceRef.current.stop();
-      } catch (e) {
-        console.warn("Could not stop audio source, it may have already finished.", e);
-      }
+    setDownloadableAudio(null);
+    if (status === 'playing' || status === 'generating') {
+      setStatus('idle');
+      setProgress(null);
     }
-    audioSourceRef.current = null;
-    audioBufferRef.current = null;
-    allAudioBytesRef.current = [];
-    setStatus('idle');
-  }, []);
+  }, [status]);
 
-  const handleGenerate = async () => {
-    if (status === 'generating') return;
-    handleReset();
-    isCancelledRef.current = false;
-    
+  const handleDownload = () => {
+    if (!downloadableAudio) return;
+    const url = URL.createObjectURL(downloadableAudio);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    a.download = 'storyteller-ai-audio.wav';
+    document.body.appendChild(a);
+    a.click();
+    URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+  };
+
+  const handleGenerateAndPlay = async () => {
+    if (status === 'generating' || status === 'playing') {
+      stopPlayback();
+      return;
+    }
+
+    generationCancelledRef.current = false;
     setStatus('generating');
     setError(null);
-    
+    setDownloadableAudio(null);
+    setProgress(null);
+
     if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
-      const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-      audioContextRef.current = new AudioContext({ sampleRate: 24000 });
+        const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+        audioContextRef.current = new AudioContext({ sampleRate: 24000 });
     }
     
     const audioContext = audioContextRef.current;
     if (audioContext.state === 'suspended') {
-      await audioContext.resume();
+        await audioContext.resume();
     }
     
     try {
-      const textChunks = chunkText(story);
-      if (textChunks.length === 0) {
-        throw new Error("Input text is empty.");
+      const chunks = story.split(/\n\s*\n/).filter(chunk => chunk.trim().length > 0);
+      if (chunks.length === 0 && story.trim().length > 0) {
+        chunks.push(story);
       }
-      
-      for (const textChunk of textChunks) {
-        if (isCancelledRef.current) break;
+      setProgress({ current: 0, total: chunks.length });
+
+      const CONCURRENCY_LIMIT = 8; // Process 8 chunks in parallel for speed
+      const generatedAudioData = new Array(chunks.length);
+
+      for (let i = 0; i < chunks.length; i += CONCURRENCY_LIMIT) {
+        if (generationCancelledRef.current) break;
+
+        const batch = chunks.slice(i, i + CONCURRENCY_LIMIT);
         
-        for await (const base64Audio of streamTextToSpeech(textChunk, selectedVoice)) {
-          if (isCancelledRef.current) break;
-          const audioBytes = decode(base64Audio);
-          allAudioBytesRef.current.push(audioBytes);
-        }
+        const promises = batch.map(async (chunkText, batchIndex) => {
+          const originalIndex = i + batchIndex;
+          if (!chunkText || generationCancelledRef.current) {
+            return { buffer: null, index: originalIndex };
+          }
+          
+          try {
+            for await (const base64Audio of streamTextToSpeech(chunkText, selectedVoice)) {
+               if (base64Audio) {
+                 const audioBytes = decode(base64Audio);
+                 const audioBuffer = await decodeAudioData(audioBytes, audioContext, 24000, 1);
+                 return { buffer: audioBuffer, index: originalIndex };
+               }
+            }
+            return { buffer: null, index: originalIndex };
+          } catch (err) {
+            console.error(`Error processing chunk ${originalIndex + 1}:`, err);
+            throw new Error(`Failed on paragraph ${originalIndex + 1}. Original error: ${(err as Error).message}`);
+          }
+        });
+        
+        const results = await Promise.all(promises);
+
+        results.forEach(result => {
+          if (result && result.buffer) {
+            generatedAudioData[result.index] = result.buffer;
+          }
+        });
+        
+        setProgress({ current: Math.min(i + CONCURRENCY_LIMIT, chunks.length), total: chunks.length });
       }
-      
-      if (isCancelledRef.current) {
-        handleReset();
+
+      if (generationCancelledRef.current) {
+        setStatus('idle');
+        setProgress(null);
         return;
       }
-
-      if (allAudioBytesRef.current.length === 0) {
-        throw new Error("No audio data was generated. The text might be empty or contain only unsupported characters.");
-      }
       
-      setStatus('ready');
+      const allAudioBuffers = generatedAudioData.filter(Boolean) as AudioBuffer[];
 
-    } catch (err) {
-      console.error("Audio Generation Error:", err);
-      const friendlyMessage = getFriendlyErrorMessage(err);
-      setError(`Failed to generate audio. ${friendlyMessage}`);
-      setStatus('error');
-      handleReset();
-    }
-  };
-
-  const handlePlay = async () => {
-    const audioContext = audioContextRef.current;
-    if (!audioContext || status !== 'ready') return;
-    
-    setStatus('playing');
-
-    try {
-      if (!audioBufferRef.current) {
-        let totalLength = 0;
-        allAudioBytesRef.current.forEach(arr => { totalLength += arr.length; });
-        const concatenatedData = new Uint8Array(totalLength);
-        let offset = 0;
-        allAudioBytesRef.current.forEach(arr => {
-            concatenatedData.set(arr, offset);
-            offset += arr.length;
-        });
-        audioBufferRef.current = await decodeAudioData(concatenatedData, audioContext, 24000, 1);
+      if (allAudioBuffers.length === 0) {
+          throw new Error("No audio data was generated. The API might have returned an empty response for the provided text.");
       }
-  
-      if (audioContext.state === 'suspended') {
-        await audioContext.resume();
-      }
+
+      const concatenatedBuffer = concatenateAudioBuffers(allAudioBuffers, audioContext);
+      const wavBlob = audioBufferToWav(concatenatedBuffer);
+      setDownloadableAudio(wavBlob);
       
+      setProgress(null);
+      setStatus('playing');
+
       const source = audioContext.createBufferSource();
-      source.buffer = audioBufferRef.current;
+      source.buffer = concatenatedBuffer;
+      
+      source.playbackRate.value = speed;
+      source.detune.value = pitch * 600;
+
       source.connect(audioContext.destination);
-      source.playbackRate.value = playbackRate;
+      source.start(audioContext.currentTime);
+      audioSourceRef.current = source;
+
       source.onended = () => {
         if (audioSourceRef.current === source) {
+            setStatus('idle');
             audioSourceRef.current = null;
-            setStatus('ready');
         }
       };
-      source.start(0);
-      audioSourceRef.current = source;
+
     } catch (err) {
-        console.error("Playback Error:", err);
-        const friendlyMessage = getFriendlyErrorMessage(err);
-        setError(`Failed to play audio. ${friendlyMessage}`);
-        setStatus('error');
-        handleReset();
-    }
-  };
-
-  const handleStop = () => {
-    if (audioSourceRef.current) {
-        audioSourceRef.current.onended = null; // Prevent onended from firing
-        try { audioSourceRef.current.stop(); } catch(e) {}
-        audioSourceRef.current = null;
-    }
-    setStatus('ready');
-  };
-
-  const handleCancel = () => {
-    isCancelledRef.current = true;
-    setStatus('idle');
-  };
-
-  const handleDownload = () => {
-    if (allAudioBytesRef.current.length === 0) {
-      setError("No audio data available to download.");
+      console.error(err);
+      const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
+      setError(`Failed to generate audio. ${errorMessage}`);
       setStatus('error');
-      return;
-    }
-
-    try {
-      let totalLength = 0;
-      allAudioBytesRef.current.forEach(arr => {
-        totalLength += arr.length;
-      });
-      const concatenatedData = new Uint8Array(totalLength);
-      let offset = 0;
-      allAudioBytesRef.current.forEach(arr => {
-        concatenatedData.set(arr, offset);
-        offset += arr.length;
-      });
-
-      const wavBlob = createWavBlob(concatenatedData, 24000, 1, 16);
-
-      const url = URL.createObjectURL(wavBlob);
-      const a = document.createElement('a');
-      a.style.display = 'none';
-      a.href = url;
-      a.download = 'storyteller-ai-audio.wav';
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      a.remove();
-    } catch (downloadError) {
-      console.error("Download Error:", downloadError);
-      const friendlyMessage = getFriendlyErrorMessage(downloadError);
-      setError(`Failed to create download file. ${friendlyMessage}`);
-      setStatus('error');
+      setDownloadableAudio(null);
+      setProgress(null);
     }
   };
 
-  const isBusy = status === 'generating' || status === 'playing' || status === 'ready';
-  const canDownload = status === 'ready' || status === 'playing';
-
-  let mainButton;
-  if (status === 'idle' || status === 'error') {
-    mainButton = (
-      <button
-        onClick={handleGenerate}
-        className="px-8 py-4 text-lg font-bold rounded-full shadow-lg transition-all duration-300 ease-in-out transform hover:scale-105 bg-gradient-to-r from-blue-500 to-teal-400 hover:from-blue-600 hover:to-teal-500 text-white"
-      >
-        Generate Audio
-      </button>
-    );
-  } else if (status === 'generating') {
-    mainButton = (
-      <button
-        onClick={handleCancel}
-        className="px-8 py-4 text-lg font-bold rounded-full shadow-lg transition-all duration-300 ease-in-out transform hover:scale-105 bg-red-600 hover:bg-red-700 text-white"
-      >
-        Cancel
-      </button>
-    );
-  } else if (status === 'ready') {
-    mainButton = (
-      <button
-        onClick={handlePlay}
-        className="px-8 py-4 text-lg font-bold rounded-full shadow-lg transition-all duration-300 ease-in-out transform hover:scale-105 bg-gradient-to-r from-blue-500 to-teal-400 hover:from-blue-600 hover:to-teal-500 text-white"
-      >
-        Play
-      </button>
-    );
-  } else { // playing
-    mainButton = (
-      <button
-        onClick={handleStop}
-        className="px-8 py-4 text-lg font-bold rounded-full shadow-lg transition-all duration-300 ease-in-out transform hover:scale-105 bg-red-600 hover:bg-red-700 text-white"
-      >
-        Stop
-      </button>
-    );
-  }
+  const isProcessing = status === 'generating' || status === 'playing';
 
   return (
     <div className="min-h-screen bg-gray-900 text-gray-200 flex flex-col items-center p-4 sm:p-6 lg:p-8">
@@ -309,41 +237,68 @@ const App: React.FC = () => {
         </header>
 
         <main className="space-y-6">
-          <StatusIndicator status={status} error={error} />
+          <StatusIndicator status={status} error={error} progress={progress} />
           <div className="bg-gray-800 p-4 rounded-lg border border-gray-700 space-y-4">
-            <div>
-              <label htmlFor="voice-select" className="block text-sm font-medium text-gray-300 mb-2">
-                Choose a Narrator's Voice
-              </label>
-              <select
-                id="voice-select"
-                value={selectedVoice}
-                onChange={(e) => setSelectedVoice(e.target.value)}
-                disabled={isBusy}
-                className="w-full p-3 bg-gray-900 border border-gray-600 rounded-md shadow-inner focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors text-gray-300 disabled:opacity-50"
-              >
-                {VOICES.map((voice) => (
-                  <option key={voice} value={voice}>{voice}</option>
-                ))}
-              </select>
+            <h3 className="text-lg font-semibold text-gray-100 mb-2 border-b border-gray-700 pb-2">Voice Settings</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="voice-select" className="block text-sm font-medium text-gray-300 mb-2">
+                    Narrator
+                  </label>
+                  <select
+                    id="voice-select"
+                    value={selectedVoice}
+                    onChange={(e) => setSelectedVoice(e.target.value)}
+                    disabled={isProcessing}
+                    className="w-full p-3 bg-gray-900 border border-gray-600 rounded-md shadow-inner focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors text-gray-300"
+                  >
+                    {VOICES.map((voice) => (
+                      <option key={voice} value={voice}>{voice}</option>
+                    ))}
+                  </select>
+                </div>
             </div>
-             <div>
-                <label htmlFor="speed-control" className="block text-sm font-medium text-gray-300 mb-2">
-                    Playback Speed: <span className="font-bold text-blue-400">{playbackRate.toFixed(2)}x</span>
-                </label>
+            <div>
+                <div className="flex justify-between items-center mb-2">
+                    <label htmlFor="pitch-slider" className="block text-sm font-medium text-gray-300">
+                        Pitch
+                    </label>
+                    <span className="text-sm font-mono text-gray-400 bg-gray-900 px-2 py-1 rounded">{pitch.toFixed(1)}</span>
+                </div>
                 <input
-                    id="speed-control"
+                    id="pitch-slider"
                     type="range"
-                    min="0.5"
-                    max="2"
-                    step="0.25"
-                    value={playbackRate}
-                    onChange={(e) => setPlaybackRate(parseFloat(e.target.value))}
-                    disabled={status === 'generating'}
+                    min="-1"
+                    max="1"
+                    step="0.1"
+                    value={pitch}
+                    onChange={(e) => setPitch(parseFloat(e.target.value))}
+                    disabled={isProcessing}
                     className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                 />
             </div>
             <div>
+                <div className="flex justify-between items-center mb-2">
+                    <label htmlFor="speed-slider" className="block text-sm font-medium text-gray-300">
+                        Speed
+                    </label>
+                    <span className="text-sm font-mono text-gray-400 bg-gray-900 px-2 py-1 rounded">{speed.toFixed(1)}x</span>
+                </div>
+                <input
+                    id="speed-slider"
+                    type="range"
+                    min="0.5"
+                    max="2"
+                    step="0.1"
+                    value={speed}
+                    onChange={(e) => setSpeed(parseFloat(e.target.value))}
+                    disabled={isProcessing}
+                    className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                />
+            </div>
+          </div>
+
+          <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
               <label htmlFor="story-text" className="block text-sm font-medium text-gray-300 mb-2">
                 Story Text
               </label>
@@ -352,21 +307,38 @@ const App: React.FC = () => {
                 value={story}
                 onChange={(e) => setStory(e.target.value)}
                 placeholder="Enter the story you want to hear..."
-                className="w-full h-64 p-3 bg-gray-900 border border-gray-600 rounded-md shadow-inner focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors text-gray-300 resize-y disabled:opacity-50"
-                disabled={isBusy}
+                className="w-full h-64 p-3 bg-gray-900 border border-gray-600 rounded-md shadow-inner focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors text-gray-300 resize-y"
+                disabled={isProcessing}
               />
-            </div>
           </div>
           
-          <div className="flex justify-center items-center space-x-4">
-            {mainButton}
-             <button
-                onClick={handleDownload}
-                disabled={!canDownload}
-                className="px-8 py-4 text-lg font-bold rounded-full shadow-lg transition-all duration-300 ease-in-out transform hover:scale-105 bg-gradient-to-r from-purple-500 to-indigo-400 hover:from-purple-600 hover:to-indigo-500 text-white disabled:opacity-50 disabled:cursor-not-allowed disabled:from-gray-600 disabled:to-gray-700 disabled:hover:scale-100"
-              >
-                Download Audio
-              </button>
+          <div className="flex justify-center items-center gap-4">
+            <button
+              onClick={handleGenerateAndPlay}
+              className={`px-8 py-4 text-lg font-bold rounded-full shadow-lg transition-all duration-300 ease-in-out transform hover:scale-105
+                ${isProcessing 
+                  ? 'bg-red-600 hover:bg-red-700 text-white' 
+                  : 'bg-gradient-to-r from-blue-500 to-teal-400 hover:from-blue-600 hover:to-teal-500 text-white'
+                }
+                ${status === 'generating' ? 'cursor-pointer' : 'cursor-pointer'}
+              `}
+            >
+              {isProcessing ? 'Stop' : 'Generate & Play'}
+            </button>
+            <button
+              onClick={handleDownload}
+              disabled={!downloadableAudio || status === 'generating'}
+              className={`flex items-center px-6 py-3 font-semibold rounded-full shadow-md transition-all duration-300 ease-in-out transform hover:scale-105
+                ${!downloadableAudio || status === 'generating'
+                  ? 'bg-gray-600 text-gray-400 cursor-not-allowed opacity-50'
+                  : 'bg-green-600 hover:bg-green-700 text-white'
+                }
+              `}
+              aria-label="Download generated audio"
+            >
+              <DownloadIcon />
+              Download
+            </button>
           </div>
         </main>
       </div>

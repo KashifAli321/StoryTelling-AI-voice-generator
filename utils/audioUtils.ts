@@ -1,3 +1,4 @@
+
 /**
  * Decodes a base64 string into a Uint8Array.
  * @param base64 The base64 encoded string.
@@ -45,50 +46,85 @@ export async function decodeAudioData(
   return buffer;
 }
 
+
 /**
- * Creates a WAV file Blob from raw PCM audio data.
- * @param pcmData The raw PCM audio data.
- * @param sampleRate The sample rate of the audio.
- * @param numChannels The number of audio channels.
- * @param bitsPerSample The number of bits per sample.
+ * Concatenates multiple AudioBuffer objects into a single AudioBuffer.
+ * @param buffers An array of AudioBuffer objects to concatenate.
+ * @param context The AudioContext to use for creating the new buffer.
+ * @returns A single AudioBuffer containing the combined audio.
+ */
+export function concatenateAudioBuffers(buffers: AudioBuffer[], context: AudioContext): AudioBuffer {
+  if (buffers.length === 0) {
+    return context.createBuffer(1, 1, context.sampleRate);
+  }
+  const numberOfChannels = buffers[0].numberOfChannels;
+  const sampleRate = buffers[0].sampleRate;
+  
+  const totalLength = buffers.reduce((acc, buffer) => acc + buffer.length, 0);
+  const result = context.createBuffer(numberOfChannels, totalLength, sampleRate);
+
+  let offset = 0;
+  for (const buffer of buffers) {
+    for (let channel = 0; channel < numberOfChannels; channel++) {
+      result.copyToChannel(buffer.getChannelData(channel), channel, offset);
+    }
+    offset += buffer.length;
+  }
+  return result;
+}
+
+/**
+ * Converts an AudioBuffer to a Blob in WAV file format.
+ * @param buffer The AudioBuffer to convert.
  * @returns A Blob representing the WAV file.
  */
-export function createWavBlob(pcmData: Uint8Array, sampleRate: number, numChannels: number, bitsPerSample: number): Blob {
-  const dataSize = pcmData.length;
-  const buffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buffer);
+export function audioBufferToWav(buffer: AudioBuffer): Blob {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const bitsPerSample = 16;
+  const channelData = buffer.getChannelData(0); // Assuming mono for this app
+  const pcmData = new Int16Array(channelData.length);
 
-  const blockAlign = (numChannels * bitsPerSample) / 8;
-  const byteRate = sampleRate * blockAlign;
+  for (let i = 0; i < channelData.length; i++) {
+    const s = Math.max(-1, Math.min(1, channelData[i]));
+    pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
 
-  function writeString(view: DataView, offset: number, str: string) {
-    for (let i = 0; i < str.length; i++) {
-      view.setUint8(offset + i, str.charCodeAt(i));
+  const dataSize = pcmData.length * (bitsPerSample / 8);
+  const bufferSize = 44 + dataSize;
+  const view = new DataView(new ArrayBuffer(bufferSize));
+
+  let offset = 0;
+
+  function writeString(view: DataView, offset: number, string: string) {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
     }
   }
 
-  // RIFF header
-  writeString(view, 0, 'RIFF');
-  view.setUint32(4, 36 + dataSize, true); // file size - 8
-  writeString(view, 8, 'WAVE');
+  // RIFF chunk descriptor
+  writeString(view, offset, 'RIFF'); offset += 4;
+  view.setUint32(offset, 36 + dataSize, true); offset += 4;
+  writeString(view, offset, 'WAVE'); offset += 4;
 
   // fmt sub-chunk
-  writeString(view, 12, 'fmt ');
-  view.setUint32(16, 16, true); // subchunk1 size (16 for PCM)
-  view.setUint16(20, 1, true); // audio format (1 for PCM)
-  view.setUint16(22, numChannels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, byteRate, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, bitsPerSample, true);
+  writeString(view, offset, 'fmt '); offset += 4;
+  view.setUint32(offset, 16, true); offset += 4; // subchunk1 size (16 for PCM)
+  view.setUint16(offset, 1, true); offset += 2; // audio format (1 = PCM)
+  view.setUint16(offset, numChannels, true); offset += 2;
+  view.setUint32(offset, sampleRate, true); offset += 4;
+  view.setUint32(offset, sampleRate * numChannels * (bitsPerSample / 8), true); offset += 4; // byte rate
+  view.setUint16(offset, numChannels * (bitsPerSample / 8), true); offset += 2; // block align
+  view.setUint16(offset, bitsPerSample, true); offset += 2;
 
   // data sub-chunk
-  writeString(view, 36, 'data');
-  view.setUint32(40, dataSize, true);
-
-  // Write PCM data
-  const pcmBytes = new Uint8Array(buffer, 44);
-  pcmBytes.set(pcmData);
+  writeString(view, offset, 'data'); offset += 4;
+  view.setUint32(offset, dataSize, true); offset += 4;
   
-  return new Blob([view], { type: 'audio/wav' });
+  // Write PCM data
+  for (let i = 0; i < pcmData.length; i++, offset += 2) {
+      view.setInt16(offset, pcmData[i], true);
+  }
+
+  return new Blob([view.buffer], { type: 'audio/wav' });
 }
