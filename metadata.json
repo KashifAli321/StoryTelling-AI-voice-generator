@@ -1,0 +1,5 @@
+{
+  "name": "Storyteller AI",
+  "description": "An application that uses Gemini's advanced text-to-speech capabilities to read a long-form story with a natural-sounding voice. Paste or use the provided text and listen to the AI narrator.",
+  "requestFramePermissions": []
+}
