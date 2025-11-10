@@ -63,6 +63,45 @@ const DownloadIcon: React.FC = () => (
     </svg>
 );
 
+const processChunkWithRetries = async (
+    chunkText: string,
+    selectedVoice: string,
+    audioContext: AudioContext,
+    originalIndex: number,
+    maxRetries: number = 3
+  ) => {
+    let lastError: Error | null = null;
+    let delay = 1000; // start with 1 second delay
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        if (!chunkText.trim()) {
+          return { buffer: null, index: originalIndex };
+        }
+        for await (const base64Audio of streamTextToSpeech(chunkText, selectedVoice)) {
+           if (base64Audio) {
+             const audioBytes = decode(base64Audio);
+             const audioBuffer = await decodeAudioData(audioBytes, audioContext, 24000, 1);
+             return { buffer: audioBuffer, index: originalIndex }; // Success
+           }
+        }
+        return { buffer: null, index: originalIndex }; // No audio yielded, but no error
+      } catch (err) {
+        lastError = err as Error;
+        console.warn(`Attempt ${attempt} for paragraph ${originalIndex + 1} failed:`, lastError.message);
+        if (attempt < maxRetries) {
+          console.log(`Retrying in ${delay / 1000}s...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          delay *= 2; // Exponential backoff
+        }
+      }
+    }
+    // If all retries failed, throw an error to be caught by the main handler.
+    console.error(`All ${maxRetries} attempts failed for paragraph ${originalIndex + 1}.`);
+    throw new Error(`Failed on paragraph ${originalIndex + 1} after ${maxRetries} attempts. Last error: ${lastError?.message || 'Unknown'}`);
+};
+
+
 const App: React.FC = () => {
   const [story, setStory] = useState<string>(STORY_TEXT);
   const [status, setStatus] = useState<Status>('idle');
@@ -136,7 +175,7 @@ const App: React.FC = () => {
       }
       setProgress({ current: 0, total: chunks.length });
 
-      const CONCURRENCY_LIMIT = 8; // Process 8 chunks in parallel for speed
+      const CONCURRENCY_LIMIT = 8;
       const generatedAudioData = new Array(chunks.length);
 
       for (let i = 0; i < chunks.length; i += CONCURRENCY_LIMIT) {
@@ -144,25 +183,12 @@ const App: React.FC = () => {
 
         const batch = chunks.slice(i, i + CONCURRENCY_LIMIT);
         
-        const promises = batch.map(async (chunkText, batchIndex) => {
+        const promises = batch.map((chunkText, batchIndex) => {
           const originalIndex = i + batchIndex;
-          if (!chunkText || generationCancelledRef.current) {
-            return { buffer: null, index: originalIndex };
+          if (generationCancelledRef.current) {
+            return Promise.resolve({ buffer: null, index: originalIndex });
           }
-          
-          try {
-            for await (const base64Audio of streamTextToSpeech(chunkText, selectedVoice)) {
-               if (base64Audio) {
-                 const audioBytes = decode(base64Audio);
-                 const audioBuffer = await decodeAudioData(audioBytes, audioContext, 24000, 1);
-                 return { buffer: audioBuffer, index: originalIndex };
-               }
-            }
-            return { buffer: null, index: originalIndex };
-          } catch (err) {
-            console.error(`Error processing chunk ${originalIndex + 1}:`, err);
-            throw new Error(`Failed on paragraph ${originalIndex + 1}. Original error: ${(err as Error).message}`);
-          }
+          return processChunkWithRetries(chunkText, selectedVoice, audioContext, originalIndex);
         });
         
         const results = await Promise.all(promises);
