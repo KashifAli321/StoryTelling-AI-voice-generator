@@ -1,20 +1,95 @@
-
 <!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Storyteller AI</title>
+    <title>Text to Speech</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400;1,500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Lora:ital,wght@0;400;0;500;1,400;1,500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
     <style>
       body {
         font-family: 'Inter', sans-serif;
       }
       h1, h2, h3 {
         font-family: 'Lora', serif;
+      }
+      .material-symbols-outlined {
+        font-variation-settings:
+        'FILL' 0,
+        'wght' 400,
+        'GRAD' 0,
+        'opsz' 24
+      }
+      .markdown-content h1, .markdown-content h2, .markdown-content h3 {
+        font-family: 'Lora', serif;
+        font-weight: bold;
+        margin-top: 1.5em;
+        margin-bottom: 0.5em;
+      }
+      .markdown-content h1 { font-size: 1.5em; }
+      .markdown-content h2 { font-size: 1.25em; }
+      .markdown-content h3 { font-size: 1.1em; }
+      .markdown-content p {
+        line-height: 1.6;
+      }
+      .markdown-content ul, .markdown-content ol {
+        list-style-position: inside;
+        padding-left: 1em;
+      }
+      .markdown-content ul {
+        list-style-type: disc;
+      }
+      .markdown-content ol {
+        list-style-type: decimal;
+      }
+      .markdown-content li {
+        margin-bottom: 0.25em;
+      }
+      .markdown-content a {
+        color: #60a5fa; /* blue-400 */
+        text-decoration: underline;
+      }
+      .markdown-content a:hover {
+        color: #93c5fd; /* blue-300 */
+      }
+      .markdown-content code {
+        background-color: #1f2937; /* gray-800 */
+        padding: 0.2em 0.4em;
+        border-radius: 4px;
+        font-family: monospace;
+        color: #e5e7eb; /* gray-200 */
+      }
+      .markdown-content pre {
+        background-color: #111827; /* gray-900 */
+        padding: 1em;
+        border-radius: 8px;
+        overflow-x: auto;
+      }
+      .markdown-content pre code {
+        padding: 0;
+        background-color: transparent;
+      }
+      .markdown-content blockquote {
+        border-left: 4px solid #4b5563; /* gray-600 */
+        padding-left: 1em;
+        color: #d1d5db; /* gray-300 */
+        font-style: italic;
+      }
+      .markdown-content table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 1em;
+        margin-bottom: 1em;
+      }
+      .markdown-content th, .markdown-content td {
+        border: 1px solid #4b5563; /* gray-600 */
+        padding: 0.5em 1em;
+      }
+      .markdown-content th {
+        background-color: #374151; /* gray-700 */
       }
     </style>
   <script type="importmap">
@@ -23,12 +98,13 @@
     "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
     "react/": "https://aistudiocdn.com/react@^19.2.0/",
     "react": "https://aistudiocdn.com/react@^19.2.0",
-    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.29.0"
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.29.0",
+    "marked": "https://aistudiocdn.com/marked@^14.0.0"
   }
 }
 </script>
 </head>
-  <body class="bg-gray-900">
+  <body class="bg-gray-900 text-gray-200">
     <div id="root"></div>
     <script type="module" src="/index.tsx"></script>
   </body>
